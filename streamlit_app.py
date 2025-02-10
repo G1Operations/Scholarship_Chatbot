@@ -1,56 +1,240 @@
 import streamlit as st
-from openai import OpenAI
+import pandas as pd
+import openai
+import os
+from pyairtable import Table
+from pyairtable import Api
+from datetime import datetime
+import csv
+import io
 
-# Show title and description.
-st.title("💬 Chatbot")
+
+st.set_page_config(layout="wide")
+
+
+# Airtable credentials
+AIRTABLE_PERSONAL_TOKEN = os.getenv("AIRTABLE_PERSONAL_TOKEN")  # Store securely in environment variables
+BASE_ID = "appvzxcqpeB4LdvIV"
+TABLE_NAME = "Scholarships (LIST)"
+VIEW_NAME= "All Scholarship by due date"
+
+
+# Function to estimate the number of tokens in a string
+def num_tokens_from_string(string: str) -> int:
+   """Estimate the number of tokens in a string by using a simple heuristic (approx 4 tokens per word)."""
+   return len(string.split()) * 4  # Heuristic: Approx 4 tokens per word
+
+
+# Add a logo at the top of the page
+st.image("Logo.png", width=300)  # Adjust width as needed
+
+
+st.title("💬Scholarship Opportunity Chatbot")
 st.write(
-    "This is a simple chatbot that uses OpenAI's GPT-3.5 model to generate responses. "
-    "To use this app, you need to provide an OpenAI API key, which you can get [here](https://platform.openai.com/account/api-keys). "
-    "You can also learn how to build this app step by step by [following our tutorial](https://docs.streamlit.io/develop/tutorials/llms/build-conversational-apps)."
+   "This chatbot allows you to query scholarship opportunities compiled by GenOne. "
+   "Feel free to fiter by school/demographic (optional)."
+   "You can download your results for future reference"
 )
 
-# Ask user for their OpenAI API key via `st.text_input`.
-# Alternatively, you can store the API key in `./.streamlit/secrets.toml` and access it
-# via `st.secrets`, see https://docs.streamlit.io/develop/concepts/connections/secrets-management
-openai_api_key = st.text_input("OpenAI API Key", type="password")
+
+# Load the OpenAI API key securely from environment variables
+openai_api_key = os.getenv("OPENAI_API_KEY")
+
+
 if not openai_api_key:
-    st.info("Please add your OpenAI API key to continue.", icon="🗝️")
+   st.error("Please contact Admin for issue associated with missing OpenAI API key.")
 else:
+   openai.api_key = openai_api_key  # Set OpenAI API key
 
-    # Create an OpenAI client.
-    client = OpenAI(api_key=openai_api_key)
 
-    # Create a session state variable to store the chat messages. This ensures that the
-    # messages persist across reruns.
-    if "messages" not in st.session_state:
-        st.session_state.messages = []
+# OpenAI API client using the provided API key
+client = openai.Client(api_key=openai_api_key)
 
-    # Display the existing chat messages via `st.chat_message`.
-    for message in st.session_state.messages:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
 
-    # Create a chat input field to allow the user to enter a message. This will display
-    # automatically at the bottom of the page.
-    if prompt := st.chat_input("What is up?"):
 
-        # Store and display the current prompt.
-        st.session_state.messages.append({"role": "user", "content": prompt})
-        with st.chat_message("user"):
-            st.markdown(prompt)
 
-        # Generate a response using the OpenAI API.
-        stream = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[
-                {"role": m["role"], "content": m["content"]}
-                for m in st.session_state.messages
-            ],
-            stream=True,
-        )
+# Load data from Airtable
+@st.cache_data(ttl=60)  # Cache data for only 60 seconds
+def load_data():
+   if not AIRTABLE_PERSONAL_TOKEN:
+       st.error("Missing Airtable personal token. Please contact Admin.")
+       st.stop()
 
-        # Stream the response to the chat using `st.write_stream`, then store it in 
-        # session state.
-        with st.chat_message("assistant"):
-            response = st.write_stream(stream)
-        st.session_state.messages.append({"role": "assistant", "content": response})
+
+   # Authenticate using the personal token
+   api = Api(AIRTABLE_PERSONAL_TOKEN)
+   table = api.table(BASE_ID, TABLE_NAME)
+   # Fetch records
+   records = table.all()
+
+
+   if not records:
+       return pd.DataFrame()  # Return empty DataFrame if no data found
+
+
+   # Collect all possible columns dynamically
+   all_columns = set()
+   for record in records:
+       all_columns.update(record["fields"].keys())
+
+
+   # Convert Airtable records to DataFrame, ensuring all columns are included
+   df = pd.DataFrame([{col: record["fields"].get(col, None) for col in all_columns} for record in records])
+
+
+   # Ensure "Scholarship Name" is the first column
+   if "Scholarship Name" in df.columns:
+       cols = ["Scholarship Name"] + [col for col in df.columns if col != "Scholarship Name"]
+       df = df[cols]
+
+
+   # Convert "Deadline this year" to datetime and filter out past deadlines
+   if "Deadline this year" in df.columns:
+       df["Deadline this year"] = pd.to_datetime(df["Deadline this year"], errors="coerce")
+
+
+       # Keep records where deadline is either in the future or missing
+       today = datetime.today()
+       df = df[(df["Deadline this year"].isna()) | (df["Deadline this year"] >= today)]
+
+
+   # Clean and preprocess data
+   df = df.applymap(lambda x: str(x).strip() if isinstance(x, str) else x)
+   df["School (if specific)"] = df["School (if specific)"].fillna("All")
+
+
+   # Ensure "Demographic" column exists
+   if "Demographic focus" not in df.columns:
+       df["Demographic focus"] = "Unknown"
+
+
+   return df
+
+
+df = load_data()
+st.write("### Preview of all Scholarships")
+st.dataframe(df)
+
+
+# Extract unique school options from the column
+school_options = sorted(df["School (if specific)"].fillna("All").unique())  # Fill NaN with "All"
+selected_school = st.selectbox(
+   "Select the school related to your scholarship search (leave as 'All (No Filter)' for all):",
+   ["All (No Filter)"] + school_options  # Add "All (No Filter)" option
+)
+
+
+# Add demographic dropdown only if "All (No Filter)" is not selected
+df["Demographic focus"] = df["Demographic focus"].fillna("All")  # Fill NaN with "All"
+demographic_options = sorted(df["Demographic focus"].unique())
+selected_demographic = st.selectbox(
+   "Select your demographic group (leave as 'All (No Filter)' for all):",
+   ["All (No Filter)"] + demographic_options  # Add "All (No Filter)" option
+)
+
+
+# Default to all data if "All (No Filter)" is selected
+filtered_data = df.copy()
+
+
+# Apply filters only if a specific selection is made
+if selected_school != "All (No Filter)":
+   filtered_data = filtered_data[filtered_data["School (if specific)"] == selected_school]
+
+
+if selected_demographic != "All (No Filter)":
+   filtered_data = filtered_data[filtered_data["Demographic focus"] == selected_demographic]
+
+
+# Chatbot Logic (stores all previous user messages)
+if "messages" not in st.session_state:
+   st.session_state.messages = []
+
+
+# Wait for the user's query
+if user_query := st.chat_input("What kind of scholarship opportunities are you looking for?"):
+   st.session_state.messages.append({"role": "user", "content": user_query})
+   with st.chat_message("user"):
+       st.markdown(user_query)
+
+
+   # Convert filtered data to string for token estimation
+   filtered_data_string = filtered_data.to_string(index=False)
+   token_count = num_tokens_from_string(filtered_data_string)
+
+
+   # Prepare the prompt for OpenAI API
+   prompt = f"""
+   ### Objective
+   The chatbot assists users in discovering relevant opportunities by querying the provided data. Responses should include:
+   - Relevant details about matching opportunities with all the fields and descriptions
+   - A user-friendly display, with tables for multiple matches.
+   - ### Table Format Example: | Scholarship Name | Amount | Requirements | Minimum GPA | Scholarship Website | Deadline Status | Deadline this year | School (if specific) | Demographic focus | Notes |
+   - Clarity, friendliness, and professionalism.
+   - Make sure to look through the full data and provide all the matching responses.
+   - It is important to give ALL matching responses
+
+
+   ### Filtered Table Data
+   {filtered_data_string}
+
+
+   ### User Query
+   {user_query}
+   """
+
+
+   # Generate Chat Response using OpenAI
+   response = client.chat.completions.create(
+       model="gpt-4o-mini",
+       messages=[
+           {"role": "system", "content": "You are a helpful student assistant."},
+           {"role": "user", "content": prompt},
+       ],
+       temperature=0.2,
+   )
+
+
+   response_content = response.choices[0].message.content if response and hasattr(response, "choices") else ""
+
+
+   if response_content:
+       st.write("### Matching Scholarship Opportunities")
+       st.write(response_content)
+
+
+   if response_content:
+       # Parse response into structured format (assuming response contains a table)
+       response_lines = response_content.split("\n")  # Split response by new lines
+       structured_data = []
+
+
+       for line in response_lines:
+           fields = [field.strip() for field in line.split("|")]  # Split by '|' and clean whitespace
+           if len(fields) > 1:  # Ensure it's not an empty line or header
+               structured_data.append(fields)
+
+
+       # Convert structured data to DataFrame
+       if structured_data:
+           # Extract headers and data
+           headers = structured_data[0]  # Assuming first row contains headers
+           rows = structured_data[1:]  # The rest are actual data
+
+
+           # Create DataFrame
+           response_df = pd.DataFrame(rows, columns=headers)
+
+
+           # Convert DataFrame to CSV format
+           csv_buffer = io.StringIO()
+           response_df.to_csv(csv_buffer, index=False)
+
+
+           # Convert to downloadable file
+           st.download_button(
+               label="📥 Download Chatbot Response as CSV",
+               data=csv_buffer.getvalue().encode("utf-8"),
+               file_name="chatbot_response.csv",
+               mime="text/csv",
+           )
