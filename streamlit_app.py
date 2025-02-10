@@ -126,7 +126,8 @@ selected_school = st.selectbox(
 
 # Add demographic dropdown only if "All (No Filter)" is not selected
 df["Demographic focus"] = df["Demographic focus"].fillna("All")  # Fill NaN with "All"
-demographic_options = sorted(df["Demographic focus"].unique())
+#demographic_options = sorted(df["Demographic focus"].unique())
+demographic_options=df["Demographic focus"]
 selected_demographic = st.selectbox(
    "Select your demographic group (leave as 'All (No Filter)' for all):",
    ["All (No Filter)"] + demographic_options  # Add "All (No Filter)" option
