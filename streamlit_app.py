@@ -12,11 +12,12 @@ import io
 st.set_page_config(layout="wide")
 
 
+
+
 # Airtable credentials
 AIRTABLE_PERSONAL_TOKEN = os.getenv("AIRTABLE_PERSONAL_TOKEN")  # Store securely in environment variables
 BASE_ID = "appvzxcqpeB4LdvIV"
 TABLE_NAME = "Scholarships (LIST)"
-VIEW_NAME= "All Scholarship by due date"
 
 
 # Function to estimate the number of tokens in a string
@@ -26,13 +27,13 @@ def num_tokens_from_string(string: str) -> int:
 
 
 # Add a logo at the top of the page
-st.image("Logo.png", width=300)  # Adjust width as needed
+st.image("Logo2.png", width=300)  # Adjust width as needed
 
 
 st.title("💬Scholarship Opportunity Chatbot")
 st.write(
    "This chatbot allows you to query scholarship opportunities compiled by GenOne. "
-   "Feel free to fiter by school/demographic (optional)."
+   "Feel free to filter by school/demographic (optional)."
    "You can download your results for future reference"
 )
 
@@ -65,21 +66,16 @@ def load_data():
    api = Api(AIRTABLE_PERSONAL_TOKEN)
    table = api.table(BASE_ID, TABLE_NAME)
    # Fetch records
-   records = table.all()
+   records = table.all(view="All Scholarships for Chatbot")  # Specify the correct view
 
 
    if not records:
        return pd.DataFrame()  # Return empty DataFrame if no data found
 
 
-   # Collect all possible columns dynamically
-   all_columns = set()
-   for record in records:
-       all_columns.update(record["fields"].keys())
-
-
-   # Convert Airtable records to DataFrame, ensuring all columns are included
-   df = pd.DataFrame([{col: record["fields"].get(col, None) for col in all_columns} for record in records])
+ 
+    # Extract only the fields returned by Airtable (avoiding dynamically adding all possible fields)
+   df = pd.DataFrame([record["fields"] for record in records])
 
 
    # Ensure "Scholarship Name" is the first column
@@ -100,7 +96,12 @@ def load_data():
 
    # Clean and preprocess data
    df = df.applymap(lambda x: str(x).strip() if isinstance(x, str) else x)
-   df["School (if specific)"] = df["School (if specific)"].fillna("All")
+   if "School (if specific)" in df.columns:
+    df["School (if specific)"] = df["School (if specific)"].fillna("All (School Unspecified)")
+   else:
+    df["School (if specific)"] = "All (School Unspecified)"  # Create column with default value if missing
+
+
 
 
    # Ensure "Demographic" column exists
@@ -112,12 +113,27 @@ def load_data():
 
 
 df = load_data()
-st.write("### Preview of all Scholarships")
-st.dataframe(df)
+
+
+st.write("### Preview of Scholarships")
+
+
+# Define the fields to preview
+preview_columns = ["Scholarship Name", "Amount", "Minimum GPA", "Deadline this year", "Scholarship Website", "Status of Deadline", "Amount- details", "Renewable?", "Amount Category (per Year)", "Requirements and other Focus:", "Residency Requirements (US, Perm, DACA, All)", "Notes", "Demographic focus", "Region", "School Specific?", "School (if specific)"]
+
+
+# Ensure only existing columns are used (in case some are missing)
+preview_columns = [col for col in preview_columns if col in df.columns]
+
+
+# Display only the selected columns
+st.dataframe(df[preview_columns])
+
+
 
 
 # Extract unique school options from the column
-school_options = sorted(df["School (if specific)"].fillna("All").unique())  # Fill NaN with "All"
+school_options = sorted(df["School (if specific)"].fillna("All (School Unspecified)").unique())  # Fill NaN with "All"
 selected_school = st.selectbox(
    "Select the school related to your scholarship search (leave as 'All (No Filter)' for all):",
    ["All (No Filter)"] + school_options  # Add "All (No Filter)" option
@@ -125,9 +141,8 @@ selected_school = st.selectbox(
 
 
 # Add demographic dropdown only if "All (No Filter)" is not selected
-df["Demographic focus"] = df["Demographic focus"].fillna("All")  # Fill NaN with "All"
-#demographic_options = sorted(df["Demographic focus"].unique())
-demographic_options=df["Demographic focus"]
+df["Demographic focus"] = df["Demographic focus"].fillna("All (Demography Unspecified)")  # Fill NaN with "All"
+demographic_options = sorted(df["Demographic focus"].unique())
 selected_demographic = st.selectbox(
    "Select your demographic group (leave as 'All (No Filter)' for all):",
    ["All (No Filter)"] + demographic_options  # Add "All (No Filter)" option
@@ -174,6 +189,8 @@ if user_query := st.chat_input("What kind of scholarship opportunities are you l
    - Clarity, friendliness, and professionalism.
    - Make sure to look through the full data and provide all the matching responses.
    - It is important to give ALL matching responses
+   - But don't add a respone just for reference only if it does not match all filters of the user query needs.
+   - do not have a reponse saying "but were included for completeness", don't include if it doesn't match
 
 
    ### Filtered Table Data
@@ -183,11 +200,20 @@ if user_query := st.chat_input("What kind of scholarship opportunities are you l
    ### User Query
    {user_query}
    """
+   # Determine which model to use
+   model_name = "gpt-4o-mini" if (
+       (selected_school == "All (No Filter)" and selected_demographic == "All (No Filter)") or
+       (selected_school == "All (School Unspecified)" and selected_demographic == "All (Demography Unspecified)") or
+       (selected_school == "All (School Unspecified)" and selected_demographic == "All (No Filter)") or
+       (selected_school == "All (No Filter)" and selected_demographic == "All (Demography Unspecified)")
+   ) else "gpt-4"
+
+
 
 
    # Generate Chat Response using OpenAI
    response = client.chat.completions.create(
-       model="gpt-4o-mini",
+       model=model_name,
        messages=[
            {"role": "system", "content": "You are a helpful student assistant."},
            {"role": "user", "content": prompt},
@@ -239,3 +265,4 @@ if user_query := st.chat_input("What kind of scholarship opportunities are you l
                file_name="chatbot_response.csv",
                mime="text/csv",
            )
+
